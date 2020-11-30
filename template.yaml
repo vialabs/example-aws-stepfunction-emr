@@ -1,0 +1,130 @@
+AWSTemplateFormatVersion: 2010-09-09
+Transform: AWS::Serverless-2016-10-31
+
+Parameters:
+
+  ScriptBucket:
+    Type: String
+
+  EmailError:
+    Type: String
+
+Resources:
+  
+  EMRCluster:
+    Type: AWS::EMR::Cluster
+    Properties:
+      Name: !Ref AWS::StackName
+      Applications:
+        - Name: Spark
+      ReleaseLabel: emr-5.31.0
+      Instances:
+        MasterInstanceGroup:
+          Name: Master
+          InstanceCount: 1
+          InstanceType: m5.xlarge
+          Market: ON_DEMAND
+      BootstrapActions:
+         - Name: install_libs
+           ScriptBootstrapAction:
+            Path: !Sub 's3://${ScriptBucket}/install_libs.sh'
+      VisibleToAllUsers: true
+      ServiceRole: EMR_DefaultRole
+      JobFlowRole: EMR_EC2_DefaultRole
+      AutoScalingRole: EMR_AutoScaling_DefaultRole
+      LogUri: !Sub "s3://${EMRClusterLogs}/"
+  
+  EMRClusterLogs:
+    Type: AWS::S3::Bucket
+
+  EMRClusterIdParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub
+        - "${env}-test-cluster-id"
+        - { env: !Select [ 1, !Split [ "-", !Ref "AWS::StackName" ] ] }
+      Value: !Sub "${EMRCluster}"
+      Type: String
+
+  GetClusterIdFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Runtime: python3.8
+      CodeUri: ./src/get_cluster_id/
+      Handler: lambda_function.lambda_handler
+      Timeout: 900
+      Environment:
+        Variables:
+          CLUTER_ID_PARAM: !Ref EMRClusterIdParameter
+      Policies:
+        - Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Action:
+                - ssm:GetParameter
+              Resource:
+                - !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/${EMRClusterIdParameter}'
+
+  AddStepStateMachine:
+    Type: AWS::StepFunctions::StateMachine
+    Properties:
+      StateMachineName: !Sub
+        - "${env}-add-step-state-machine"
+        - { env: !Select [ 1, !Split [ "-", !Ref "AWS::StackName" ] ] }
+      DefinitionString: !Sub |-
+        {
+          "StartAt": "Get Cluster Id",
+          "States": {
+            "Get Cluster Id": {
+              "Type": "Task",
+              "Resource": "${GetClusterIdFunction.Arn}",
+              "Catch": [{
+                "ErrorEquals": ["States.TaskFailed"],
+                "Next": "fallback"
+              }],
+              "Next": "Add Step"
+            },
+            "Add Step": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::elasticmapreduce:addStep.sync",
+              "Parameters": {
+                "ClusterId.$": "$.clusterId",
+                "Step": {
+                  "Name": "Hello World",
+                  "HadoopJarStep": {
+                    "Jar": "command-runner.jar",
+                    "Args": [
+                      "spark-submit",
+                      "s3://${ScriptBucket}/hello_world.py",
+                      "${SNSError}"
+                    ]
+                  },
+                  "ActionOnFailure": "CONTINUE"
+                }
+              },
+              "Catch": [{
+                "ErrorEquals": ["States.TaskFailed"],
+                "Next": "fallback"
+              }],
+              "End": true
+            },
+            "fallback": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::sns:publish",
+              "Parameters": {
+                "TopicArn": "${SNSError}",
+                "Subject": "ERRO Step Function",
+                "Message.$": "$"
+              },
+              "End": true
+            }
+          }
+        }
+      RoleArn: !Sub "arn:aws:iam::${AWS::AccountId}:role/step_functions_basic_execution"
+
+  SNSError:
+    Type: AWS::SNS::Topic
+    Properties:
+      Subscription:
+        - Endpoint: !Ref EmailError
+          Protocol: "email"
