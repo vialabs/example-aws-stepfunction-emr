@@ -44,5 +44,5 @@ aws cloudformation package --template-file template.yaml --output-template-file 
 ```
 
 ```bash
-aws cloudformation deploy --template-file template_output_%ENV%.tmp --stack-name cfstack-$%ENV%-test --capabilities CAPABILITY_IAM --parameter-overrides ScriptBucket=%SCRIPT_BUCKET% EmailError=%EMAIL_ERROR%
+aws cloudformation deploy --template-file template_output_%ENV%.tmp --stack-name cfstack-%ENV%-test --capabilities CAPABILITY_IAM --parameter-overrides ScriptBucket=%SCRIPT_BUCKET% EmailError=%EMAIL_ERROR%
 ```
