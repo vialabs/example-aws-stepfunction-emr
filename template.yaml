@@ -3,7 +3,7 @@ Transform: AWS::Serverless-2016-10-31
 
 Parameters:
 
-  ScriptBucket:
+  ArtifactsBucket:
     Type: String
 
   EmailError:
@@ -11,120 +11,319 @@ Parameters:
 
 Resources:
   
-  EMRCluster:
-    Type: AWS::EMR::Cluster
+  EMRClusterServiceRole:
+    Type: AWS::IAM::Role
     Properties:
-      Name: !Ref AWS::StackName
-      Applications:
-        - Name: Spark
-      ReleaseLabel: emr-5.31.0
-      Instances:
-        MasterInstanceGroup:
-          Name: Master
-          InstanceCount: 1
-          InstanceType: m5.xlarge
-          Market: ON_DEMAND
-      BootstrapActions:
-         - Name: install_libs
-           ScriptBootstrapAction:
-            Path: !Sub 's3://${ScriptBucket}/install_libs.sh'
-      VisibleToAllUsers: true
-      ServiceRole: EMR_DefaultRole
-      JobFlowRole: EMR_EC2_DefaultRole
-      AutoScalingRole: EMR_AutoScaling_DefaultRole
-      LogUri: !Sub "s3://${EMRClusterLogs}/"
-  
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Principal:
+              Service:
+                - "elasticmapreduce.amazonaws.com"
+            Action:
+              - "sts:AssumeRole"
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonElasticMapReduceRole
+      Tags:
+        - Key: Example
+          Value: !Ref AWS::StackName
+
+  EMRClusterinstanceProfileRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Principal:
+              Service:
+                - "ec2.amazonaws.com"
+            Action:
+              - "sts:AssumeRole"
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonElasticMapReduceforEC2Role
+
+  EMRClusterinstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref EMRClusterinstanceProfileRole
+
   EMRClusterLogs:
     Type: AWS::S3::Bucket
-
-  EMRClusterIdParameter:
-    Type: AWS::SSM::Parameter
     Properties:
-      Name: !Sub
-        - "${env}-test-cluster-id"
-        - { env: !Select [ 1, !Split [ "-", !Ref "AWS::StackName" ] ] }
-      Value: !Sub "${EMRCluster}"
-      Type: String
-
-  GetClusterIdFunction:
-    Type: AWS::Serverless::Function
-    Properties:
-      Runtime: python3.8
-      CodeUri: ./src/get_cluster_id/
-      Handler: lambda_function.lambda_handler
-      Timeout: 900
-      Environment:
-        Variables:
-          CLUTER_ID_PARAM: !Ref EMRClusterIdParameter
-      Policies:
-        - Version: '2012-10-17'
-          Statement:
-            - Effect: Allow
-              Action:
-                - ssm:GetParameter
-              Resource:
-                - !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/${EMRClusterIdParameter}'
-
-  AddStepStateMachine:
-    Type: AWS::StepFunctions::StateMachine
-    Properties:
-      StateMachineName: !Sub
-        - "${env}-add-step-state-machine"
-        - { env: !Select [ 1, !Split [ "-", !Ref "AWS::StackName" ] ] }
-      DefinitionString: !Sub |-
-        {
-          "StartAt": "Get Cluster Id",
-          "States": {
-            "Get Cluster Id": {
-              "Type": "Task",
-              "Resource": "${GetClusterIdFunction.Arn}",
-              "Catch": [{
-                "ErrorEquals": ["States.TaskFailed"],
-                "Next": "fallback"
-              }],
-              "Next": "Add Step"
-            },
-            "Add Step": {
-              "Type": "Task",
-              "Resource": "arn:aws:states:::elasticmapreduce:addStep.sync",
-              "Parameters": {
-                "ClusterId.$": "$.clusterId",
-                "Step": {
-                  "Name": "Hello World",
-                  "HadoopJarStep": {
-                    "Jar": "command-runner.jar",
-                    "Args": [
-                      "spark-submit",
-                      "s3://${ScriptBucket}/hello_world.py",
-                      "${SNSError}"
-                    ]
-                  },
-                  "ActionOnFailure": "CONTINUE"
-                }
-              },
-              "Catch": [{
-                "ErrorEquals": ["States.TaskFailed"],
-                "Next": "fallback"
-              }],
-              "End": true
-            },
-            "fallback": {
-              "Type": "Task",
-              "Resource": "arn:aws:states:::sns:publish",
-              "Parameters": {
-                "TopicArn": "${SNSError}",
-                "Subject": "ERRO Step Function",
-                "Message.$": "$"
-              },
-              "End": true
-            }
-          }
-        }
-      RoleArn: !Sub "arn:aws:iam::${AWS::AccountId}:role/step_functions_basic_execution"
+      Tags:
+        - Key: Example
+          Value: !Ref AWS::StackName
 
   SNSError:
     Type: AWS::SNS::Topic
     Properties:
       Subscription:
-        - Endpoint: !Ref EmailError
-          Protocol: "email"
+        - Protocol: "email"
+          Endpoint: !Ref EmailError
+      Tags:
+        - Key: Example
+          Value: !Ref AWS::StackName
+
+  ControlFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Runtime: python3.8
+      CodeUri: ./src/control/
+      Handler: lambda_function.lambda_handler
+      Timeout: 900
+      Environment:
+        Variables:
+          CLUSTER_NAME: !Ref "AWS::StackName"
+          SNS_ERROR: !Ref SNSError
+          STACK_NAME: !Ref AWS::StackName
+      Policies:
+        - Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Action:
+                - 'elasticmapreduce:ListClusters'
+                - 'elasticmapreduce:ListSteps'
+              Resource: '*'
+      Tags:
+        Example: !Ref AWS::StackName
+
+  StepFunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Action: "sts:AssumeRole"
+            Principal:
+              Service: "states.amazonaws.com"
+      Policies:
+        - PolicyName: StateMachinePermissions
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: "lambda:InvokeFunction"
+                Resource: !Sub "${ControlFunction.Arn}"
+              - Effect: Allow
+                Action:
+                  - "elasticmapreduce:AddJobFlowSteps"
+                  - "elasticmapreduce:DescribeCluster"
+                  - "elasticmapreduce:DescribeStep"
+                  - "elasticmapreduce:RunJobFlow"
+                  - "elasticmapreduce:TerminateJobFlows"
+                Resource: !Sub "arn:aws:elasticmapreduce:${AWS::Region}:${AWS::AccountId}:cluster/*"
+              - Effect: Allow
+                Action: "iam:PassRole"
+                Resource:
+                  - !Sub ${EMRClusterServiceRole.Arn}
+                  - !Sub ${EMRClusterinstanceProfileRole.Arn}
+              - Effect: Allow
+                Action: "sns:Publish"
+                Resource: !Sub "${SNSError}"
+      Tags:
+        - Key: Example
+          Value: !Ref AWS::StackName
+
+  StepFunction:
+    Type: AWS::StepFunctions::StateMachine
+    Properties:
+      StateMachineName: !Ref "AWS::StackName"
+      DefinitionString: !Sub |-
+        {
+          "StartAt": "Validate Input",
+          "States": {
+            
+            "Validate Input": {
+              "Type": "Pass",
+              "Parameters": {
+                "input1.$": "$.input1",
+                "input2.$": "$.input2"
+              },
+              "Next": "Get Cluster Id"
+            },
+
+            "Get Cluster Id": {
+              "Type": "Task",
+              "Resource": "${ControlFunction.Arn}",
+              "ResultPath": "$.Cluster",
+              "Next": "Cluster Exists"
+            },
+
+            "Cluster Exists": {
+              "Type": "Choice",
+              "Choices": [{
+                "Variable": "$.Cluster.Error",
+                "IsPresent": true,
+                "Next": "Fail"
+              },{
+                "Variable": "$.Cluster.ClusterId",
+                "StringEquals": "",
+                "Next": "Create Cluster"
+              }],
+              "Default": "Add Step"
+            },
+
+            "Create Cluster": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::elasticmapreduce:createCluster",
+              "Parameters": {
+                "Name": "${AWS::StackName}",
+                "ReleaseLabel": "emr-5.30.1",
+                "Applications": [
+                  { "Name": "Spark" }
+                ],
+                "BootstrapActions": [{
+                  "Name": "install_libs",
+                  "ScriptBootstrapAction": { "Path": "s3://${ArtifactsBucket}/install_libs.sh" }
+                }],
+                "Configurations":[
+                  {
+                    "Classification":"hive-site",
+                    "Properties":{
+                      "hive.metastore.client.factory.class":"com.amazonaws.glue.catalog.metastore.AWSGlueDataCatalogHiveClientFactory"
+                    }
+                  },{
+                    "Classification":"spark-hive-site",
+                    "Properties":{
+                      "hive.metastore.client.factory.class":"com.amazonaws.glue.catalog.metastore.AWSGlueDataCatalogHiveClientFactory"
+                    }
+                  }
+                ],
+                "Instances": {
+                  "KeepJobFlowAliveWhenNoSteps": true,
+                  "InstanceFleets": [
+                    {
+                      "Name": "Master",
+                      "InstanceFleetType": "MASTER",
+                      "TargetOnDemandCapacity": 1,
+                      "InstanceTypeConfigs": [
+                        {"InstanceType": "m4.large"}
+                      ]
+                    }
+                  ]
+                },
+                "VisibleToAllUsers": true,
+                "ServiceRole": "${EMRClusterServiceRole}",
+                "JobFlowRole": "${EMRClusterinstanceProfile}",
+                "LogUri": "s3://${EMRClusterLogs}/",
+                "Tags": [
+                  { "Key": "Example", "Value": "${AWS::StackName}" }
+                ]
+              },
+              "ResultSelector": {
+                "ClusterId.$": "$.ClusterId"
+              },
+              "ResultPath": "$.Cluster",
+              "Catch": [{
+                "ErrorEquals": ["States.TaskFailed"],
+                "Next": "Log Error"
+              }],
+              "Next": "Add Step"
+            },
+
+            "Add Step": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::elasticmapreduce:addStep.sync",
+              "Parameters": {
+                "ClusterId.$": "$.Cluster.ClusterId",
+                "Step": {
+                  "Name.$": "States.Format( '{}.{}', $.input1, $.input2 )",
+                  "HadoopJarStep": {
+                    "Jar": "command-runner.jar",
+                    "Args": [
+                      "spark-submit",
+                      "s3://${ArtifactsBucket}/hello_world.py",
+                      "${SNSError}"
+                    ]
+                  },
+                  "ActionOnFailure": "CONTINUE"
+                }
+              },"ResultSelector": {
+                "StepId.$": "$.StepId"
+              },
+              "ResultPath": "$.Step",
+              "Catch": [{
+                "ErrorEquals": ["States.TaskFailed"],
+                "Next": "Log Error"
+              }],
+              "Next": "Wait"
+            },
+
+            "Wait": {
+              "Type": "Wait",
+              "Seconds": 10,
+              "Next": "Get Steps"
+            },
+
+            "Get Steps": {
+              "Type": "Task",
+              "Resource": "${ControlFunction.Arn}",
+              "Parameters": {
+                "ClusterId.$": "$.Cluster.ClusterId"
+              },
+              "ResultPath": "$.Steps",
+              "Next": "Cluster Idle"
+            },
+
+            "Cluster Idle": {
+              "Type": "Choice",
+              "Choices": [{
+                "Variable": "$.Steps.Error",
+                "IsPresent": true,
+                "Next": "Fail"
+              },{
+                "Variable": "$.Steps.StepCount",
+                "NumericEquals": 0,
+                "Next": "Terminate Cluster"
+              }],
+              "Default": "Succeed"
+            },
+
+            "Terminate Cluster": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::elasticmapreduce:terminateCluster",
+              "Parameters": {
+                "ClusterId.$": "$.Cluster.ClusterId"
+              },
+              "ResultSelector": "",
+              "Catch": [{
+                "ErrorEquals": ["States.TaskFailed"],
+                "Next": "Log Error"
+              }],
+              "Next": "Succeed"
+            },
+
+            "Log Error": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::sns:publish",
+              "Parameters": {
+                "TopicArn": "${SNSError}",
+                "Subject": "ERROR Step Functions ${AWS::StackName}",
+                "Message.$": "$"
+              },
+              "Next": "Fail"
+            },
+
+            "Succeed": {
+              "Type": "Succeed"
+            },
+
+            "Fail": {
+              "Type": "Fail"
+            }
+
+          }
+        }
+      RoleArn: !Sub ${StepFunctionRole.Arn}
+      Tags:
+        - Key: Example
+          Value: !Ref AWS::StackName
+
+Outputs:
+
+  StepFunctionArn:
+    Value: !Ref StepFunction
