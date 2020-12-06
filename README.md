@@ -35,7 +35,7 @@ Build, deploy and get outputs:
 Test the Step Function:
 
 ```bash
-aws stepfunctions start-execution --state-machine-arn <value> --name value1.value2_$(date +"%Y-%m-%d-%H-%M-%S") --input "{\"input1\":\"value1\",\"input2\":\"value2\",\"ClusterId\":\"j-1234567890\",\"KeepCluster\":true}"
+aws stepfunctions start-execution --state-machine-arn <value> --name value1.value2-$(date +"%Y%m%d%H%M%S") --input "{\"input1\":\"value1\",\"input2\":\"value2\",\"ClusterId\":\"j-1234567890\",\"KeepCluster\":true}"
 ```
 
 ## WINDOWS

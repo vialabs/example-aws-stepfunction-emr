@@ -196,13 +196,19 @@ Resources:
               "Choices": [{
                 "Variable": "$.Error",
                 "IsPresent": true,
-                "Next": "Fail"
+                "Next": "Fail GetParams"
               },{
                 "Variable": "$.Cluster.ClusterId",
                 "StringEquals": "",
                 "Next": "Create Cluster"
               }],
               "Default": "Get StepExists"
+            },
+
+            "Fail GetParams": {
+              "Type": "Fail",
+              "Error": "Get Params",
+              "Cause": "Please, check the EMAIL for error message."
             },
 
             "Create Cluster": {
@@ -279,15 +285,27 @@ Resources:
               "Choices": [{
                 "Variable": "$.Error",
                 "IsPresent": true,
-                "Next": "Fail"
+                "Next": "Fail StepExistsScript"
               },{
                 "Not": {
                   "Variable": "$.Step.StepId",
                   "StringEquals": ""
                 },
-                "Next": "Fail"
+                "Next": "Fail Step Already Exists"
               }],
               "Default": "Run Load"
+            },
+
+            "Fail StepExistsScript": {
+              "Type": "Fail",
+              "Error": "Get Step Exists",
+              "Cause": "Please, check the EMAIL for error message."
+            },
+
+            "Fail Step Already Exists": {
+              "Type": "Fail",
+              "Error": "Step Already Exists",
+              "Cause": "A Step with same name is active. Wait the active step complete before start a new step."
             },
 
             "Run Load": {
@@ -347,13 +365,19 @@ Resources:
               "Choices": [{
                 "Variable": "$.Error",
                 "IsPresent": true,
-                "Next": "Fail"
+                "Next": "Fail StepCount"
               },{
                 "Variable": "$.Step.StepCount",
                 "NumericEquals": 0,
                 "Next": "Terminate Cluster"
               }],
               "Default": "Succeed"
+            },
+
+            "Fail StepCount": {
+              "Type": "Fail",
+              "Error": "Get Step Task",
+              "Cause": "Please, check the EMAIL for error message."
             },
 
             "Terminate Cluster": {
@@ -382,11 +406,13 @@ Resources:
                 "Subject.$": "States.Format('ERROR {}.{} Step Function ${AWS::StackName}',$.input1,$.input2)",
                 "Message.$": "$"
               },
-              "Next": "Fail"
+              "Next": "Fail Log Error"
             },
 
-            "Fail": {
-              "Type": "Fail"
+            "Fail Log Error": {
+              "Type": "Fail",
+              "Error": "Step Function Task",
+              "Cause": "Please, check the EMAIL for error message."
             }
 
           }
