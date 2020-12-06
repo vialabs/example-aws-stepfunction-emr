@@ -67,11 +67,11 @@ Resources:
         - Key: Example
           Value: !Ref AWS::StackName
 
-  ControlFunction:
+  GetParamsFunction:
     Type: AWS::Serverless::Function
     Properties:
       Runtime: python3.8
-      CodeUri: ./src/control/
+      CodeUri: ./src/get_params/
       Handler: lambda_function.lambda_handler
       Timeout: 900
       Environment:
@@ -85,6 +85,47 @@ Resources:
             - Effect: Allow
               Action:
                 - 'elasticmapreduce:ListClusters'
+              Resource: '*'
+      Tags:
+        Example: !Ref AWS::StackName
+
+  GetStepCountFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Runtime: python3.8
+      CodeUri: ./src/get_step_count/
+      Handler: lambda_function.lambda_handler
+      Timeout: 900
+      Environment:
+        Variables:
+          SNS_ERROR: !Ref SNSError
+          STACK_NAME: !Ref AWS::StackName
+      Policies:
+        - Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Action:
+                - 'elasticmapreduce:ListSteps'
+              Resource: '*'
+      Tags:
+        Example: !Ref AWS::StackName
+
+  GetStepExistsFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Runtime: python3.8
+      CodeUri: ./src/get_step_exists/
+      Handler: lambda_function.lambda_handler
+      Timeout: 900
+      Environment:
+        Variables:
+          SNS_ERROR: !Ref SNSError
+          STACK_NAME: !Ref AWS::StackName
+      Policies:
+        - Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Action:
                 - 'elasticmapreduce:ListSteps'
               Resource: '*'
       Tags:
@@ -107,7 +148,10 @@ Resources:
             Statement:
               - Effect: Allow
                 Action: "lambda:InvokeFunction"
-                Resource: !Sub "${ControlFunction.Arn}"
+                Resource:
+                  - !Sub "${GetParamsFunction.Arn}"
+                  - !Sub "${GetStepCountFunction.Arn}"
+                  - !Sub "${GetStepExistsFunction.Arn}"
               - Effect: Allow
                 Action:
                   - "elasticmapreduce:AddJobFlowSteps"
@@ -134,29 +178,23 @@ Resources:
       StateMachineName: !Ref "AWS::StackName"
       DefinitionString: !Sub |-
         {
-          "StartAt": "Validate Input",
+          "StartAt": "Get Params",
           "States": {
             
-            "Validate Input": {
-              "Type": "Pass",
-              "Parameters": {
-                "input1.$": "$.input1",
-                "input2.$": "$.input2"
-              },
-              "Next": "Get Cluster Id"
-            },
-
-            "Get Cluster Id": {
+            "Get Params": {
               "Type": "Task",
-              "Resource": "${ControlFunction.Arn}",
-              "ResultPath": "$.Cluster",
-              "Next": "Cluster Exists"
+              "Resource": "${GetParamsFunction.Arn}",
+              "Catch": [{
+                "ErrorEquals": ["States.TaskFailed"],
+                "Next": "Log Error"
+              }],
+              "Next": "Check Params"
             },
 
-            "Cluster Exists": {
+            "Check Params": {
               "Type": "Choice",
               "Choices": [{
-                "Variable": "$.Cluster.Error",
+                "Variable": "$.Error",
                 "IsPresent": true,
                 "Next": "Fail"
               },{
@@ -164,7 +202,7 @@ Resources:
                 "StringEquals": "",
                 "Next": "Create Cluster"
               }],
-              "Default": "Add Step"
+              "Default": "Get StepExists"
             },
 
             "Create Cluster": {
@@ -222,27 +260,51 @@ Resources:
                 "ErrorEquals": ["States.TaskFailed"],
                 "Next": "Log Error"
               }],
-              "Next": "Add Step"
+              "Next": "Get StepExists"
             },
 
-            "Add Step": {
+            "Get StepExists": {
+              "Type": "Task",
+              "Resource": "${GetStepExistsFunction.Arn}",
+              "Catch": [{
+                "ErrorEquals": ["States.TaskFailed"],
+                "Next": "Log Error"
+              }],
+              "ResultPath": "$.Step",
+              "Next": "Check StepExists"
+            },
+
+            "Check StepExists": {
+              "Type": "Choice",
+              "Choices": [{
+                "Variable": "$.Error",
+                "IsPresent": true,
+                "Next": "Fail"
+              },{
+                "Not": {
+                  "Variable": "$.Step.StepId",
+                  "StringEquals": ""
+                },
+                "Next": "Fail"
+              }],
+              "Default": "Run Load"
+            },
+
+            "Run Load": {
               "Type": "Task",
               "Resource": "arn:aws:states:::elasticmapreduce:addStep.sync",
               "Parameters": {
                 "ClusterId.$": "$.Cluster.ClusterId",
                 "Step": {
-                  "Name.$": "States.Format( '{}.{}', $.input1, $.input2 )",
+                  "Name.$": "States.Format('{}.{}',$.input1,$.input2)",
                   "HadoopJarStep": {
                     "Jar": "command-runner.jar",
-                    "Args": [
-                      "spark-submit",
-                      "s3://${ArtifactsBucket}/hello_world.py",
-                      "${SNSError}"
-                    ]
+                    "Args.$": "States.Array('spark-submit','s3://${ArtifactsBucket}/hello_world.py','${AWS::StackName}','${SNSError}',$.input1,$.input2)"
                   },
                   "ActionOnFailure": "CONTINUE"
                 }
-              },"ResultSelector": {
+              },
+              "ResultSelector": {
                 "StepId.$": "$.StepId"
               },
               "ResultPath": "$.Step",
@@ -250,33 +312,44 @@ Resources:
                 "ErrorEquals": ["States.TaskFailed"],
                 "Next": "Log Error"
               }],
-              "Next": "Wait"
+              "Next": "Check Keep"
+            },
+
+            "Check Keep": {
+              "Type": "Choice",
+              "Choices": [{
+                "Variable": "$.KeepCluster",
+                "BooleanEquals": true,
+                "Next": "Succeed"
+              }],
+              "Default": "Wait"
             },
 
             "Wait": {
               "Type": "Wait",
               "Seconds": 10,
-              "Next": "Get Steps"
+              "Next": "Get StepCount"
             },
 
-            "Get Steps": {
+            "Get StepCount": {
               "Type": "Task",
-              "Resource": "${ControlFunction.Arn}",
-              "Parameters": {
-                "ClusterId.$": "$.Cluster.ClusterId"
-              },
-              "ResultPath": "$.Steps",
-              "Next": "Cluster Idle"
+              "Resource": "${GetStepCountFunction.Arn}",
+              "Catch": [{
+                "ErrorEquals": ["States.TaskFailed"],
+                "Next": "Log Error"
+              }],
+              "ResultPath": "$.Step",
+              "Next": "Check StepCount"
             },
 
-            "Cluster Idle": {
+            "Check StepCount": {
               "Type": "Choice",
               "Choices": [{
-                "Variable": "$.Steps.Error",
+                "Variable": "$.Error",
                 "IsPresent": true,
                 "Next": "Fail"
               },{
-                "Variable": "$.Steps.StepCount",
+                "Variable": "$.Step.StepCount",
                 "NumericEquals": 0,
                 "Next": "Terminate Cluster"
               }],
@@ -297,19 +370,19 @@ Resources:
               "Next": "Succeed"
             },
 
+            "Succeed": {
+              "Type": "Succeed"
+            },
+
             "Log Error": {
               "Type": "Task",
               "Resource": "arn:aws:states:::sns:publish",
               "Parameters": {
                 "TopicArn": "${SNSError}",
-                "Subject": "ERROR Step Functions ${AWS::StackName}",
+                "Subject.$": "States.Format('ERROR {}.{} Step Function ${AWS::StackName}',$.input1,$.input2)",
                 "Message.$": "$"
               },
               "Next": "Fail"
-            },
-
-            "Succeed": {
-              "Type": "Succeed"
             },
 
             "Fail": {
